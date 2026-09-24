@@ -1,0 +1,55 @@
+{
+  "name": "pi-ralph-loop",
+  "version": "0.1.0",
+  "description": "Keep a pi agent working on a task until it is actually finished: an autonomous follow-up loop with iteration caps, error budgets, stall detection, and optional bg-jobs awareness.",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "autonomous-agent",
+    "ralph-loop",
+    "agent-loop"
+  ],
+  "author": {
+    "name": "Carbyne",
+    "email": "15847393+Carbyne@users.noreply.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Carbyne/pi-ralph-loop.git"
+  },
+  "homepage": "https://github.com/Carbyne/pi-ralph-loop#readme",
+  "bugs": {
+    "url": "https://github.com/Carbyne/pi-ralph-loop/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@earendil-works/pi-tui": "0.84.4",
+    "@types/node": "^25.9.5",
+    "typescript": "^5.9.0"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/ralph-loop/index.ts"
+    ]
+  }
+}
