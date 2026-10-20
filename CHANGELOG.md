@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.0
+
+### Fixed
+
+- `/ralph-resume` (and any follow-up fire) no longer errors during compaction. Previously,
+  resuming while `Compacting context...` ran produced
+  `Extension "<runtime>" error: Cannot submit a prompt while compaction is in progress`.
+  The loop now tracks `session_before_compact` / `session_compact` / `session_compact_failed`,
+  parks the pending follow-up, and drains it when compaction finishes (watchdog: the park
+  releases after 60s even if an end-event is missed). A send that races compaction is caught,
+  parked, and retried — never surfaced as an extension error.
+
+### Changed
+
+- `/ralph-config` now works while the loop is inactive. Edits apply to the same config the
+  loop would resume with (in-memory loop → persisted saved loop → settings defaults) and are
+  persisted, so you can tune prompt/flags of a paused loop before `/ralph-resume`. The loop is
+  NOT started by config; notice says `config saved (loop not active — /ralph-resume will use it)`.
+
 ## 0.1.0
 
 ### Added
