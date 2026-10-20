@@ -55,7 +55,7 @@ pi -e git:github.com/Carbyne/pi-ralph-loop
 /ralph-status                                                   # iterations, budget, why it stopped
 /ralph-stop                                                     # stop now
 /ralph-resume                                                   # resume after a pause/restart
-/ralph-config --delay 5s --stall 4                              # change the active loop in place
+/ralph-config --delay 5s --stall 4                              # update the loop in place (works paused too — applies on /ralph-resume)
 ```
 
 Every `<dur>` is seconds by default and accepts explicit units: `1500ms`, `60s`, `10m`, `1h`.

@@ -24,7 +24,8 @@
  *
  * Commands: /ralph [prompt] [--max N] [--max-errors N] [--delay <dur>] [--job-wait <dur>] [--job-grace <dur>]
  *           [--job-check "<template, {summary} placeholder>" | --job-check-file <path>]
- *           /ralph-config [same flags] [new prompt]  — update the active loop in place
+ *           /ralph-config [same flags] [new prompt]  — update the loop in place; also works while
+ *           inactive (edits the config /ralph-resume will use; does not start the loop)
  *           /ralph-stop  /ralph-resume  /ralph-status
  *   <dur> = seconds by default; explicit units allowed: 1500ms, 60s, 10m, 1h
  *   model errors pause the loop after --max-errors consecutive failures (default 1);
@@ -258,6 +259,13 @@ export default function (pi: ExtensionAPI): void {
     // True from a loop-fired prompt until user/rpc input arrives; error turns
     // are only attributed to the loop while set (auto-retries keep it true).
     let attributedToLoop = false;
+    // True between session_before_compact and session_compact/_failed. While
+    // set, pi.sendUserMessage throws ("Cannot submit a prompt while compaction
+    // is in progress"), so fires are parked in pendingFire and drained when
+    // compaction finishes instead of erroring the extension.
+    let compacting = false;
+    let compactWatchdog: NodeJS.Timeout | undefined;
+    let pendingFire: { text: string; label: string } | undefined;
 
     const clearTimer = () => {
         if (timer) {
@@ -300,13 +308,54 @@ export default function (pi: ExtensionAPI): void {
     function stop(reason: string): void {
         clearTimer();
         state.active = false;
+        pendingFire = undefined;
         setStatus();
         persist();
         if (lastCtx?.hasUI) lastCtx.ui.notify(`Ralph loop stopped: ${reason}`, "info");
     }
 
+    // Parked follow-up, fired once compaction ends (or by the watchdog if an
+    // end event is missed). No-op while still compacting or inactive.
+    function drainPendingFire(): void {
+        if (!state.active || !pendingFire || compacting) return;
+        const p = pendingFire;
+        pendingFire = undefined;
+        timer = setTimeout(() => {
+            if (state.active && !compacting) fire(p.text, p.label);
+        }, 300);
+        timer.unref();
+    }
+
+    function noteCompactionStart(): void {
+        compacting = true;
+        if (compactWatchdog) clearTimeout(compactWatchdog);
+        // Safety net: if the end event is missed (fork/switch/reload races),
+        // unblock after 60s rather than park the loop forever.
+        compactWatchdog = setTimeout(() => {
+            compacting = false;
+            compactWatchdog = undefined;
+            drainPendingFire();
+        }, 60_000);
+        compactWatchdog.unref();
+    }
+
+    function noteCompactionEnd(): void {
+        compacting = false;
+        if (compactWatchdog) {
+            clearTimeout(compactWatchdog);
+            compactWatchdog = undefined;
+        }
+        drainPendingFire();
+    }
+
     // Fire one follow-up prompt. Returns true if the message was queued.
     function fire(text: string, label = "follow-up"): boolean {
+        // Compaction in progress: pi refuses prompt submission right now.
+        // Park it — the compact-end handler drains it. No extension error.
+        if (compacting) {
+            pendingFire = { text, label };
+            return false;
+        }
         // A turn is already running or input is queued — agent_settled will
         // re-arm the loop, so don't add another prompt.
         if (lastCtx && (!lastCtx.isIdle() || lastCtx.hasPendingMessages())) return false;
@@ -327,8 +376,19 @@ export default function (pi: ExtensionAPI): void {
             return true;
         } catch (err) {
             state.iteration--;
+            const msg = String(err);
+            // Race: compaction started between the idle check and the send.
+            // Enter compacting mode and park the follow-up; do not surface
+            // an extension error (pi recovers on compaction end).
+            if (/compact/i.test(msg)) {
+                noteCompactionStart();
+                pendingFire = { text, label };
+                if (lastCtx?.hasUI)
+                    lastCtx.ui.notify("Ralph loop: compaction in progress — follow-up deferred until it finishes.", "info");
+                return false;
+            }
             if (lastCtx?.hasUI)
-                lastCtx.ui.notify(`ralph-loop failed to send follow-up: ${String(err)}`, "error");
+                lastCtx.ui.notify(`ralph-loop failed to send follow-up: ${msg}`, "error");
             return false;
         }
     }
@@ -435,6 +495,7 @@ export default function (pi: ExtensionAPI): void {
     function pause(reason: string, level: "warning" | "error" = "warning"): void {
         clearTimer();
         state.active = false;
+        pendingFire = undefined;
         setStatus();
         persist();
         if (lastCtx?.hasUI)
@@ -507,6 +568,12 @@ export default function (pi: ExtensionAPI): void {
         lastCtx = ctx;
         settings = loadSettings(ctx.cwd);
         clearTimer();
+        compacting = false;
+        pendingFire = undefined;
+        if (compactWatchdog) {
+            clearTimeout(compactWatchdog);
+            compactWatchdog = undefined;
+        }
         bgStatus = { running: 0, jobs: [] };
         state = { active: false, iteration: 0, cfg: defaultConfig(settings), lastStuckFiredAt: 0, consecutiveErrors: 0, stallStreak: 0 };
 
@@ -592,6 +659,22 @@ export default function (pi: ExtensionAPI): void {
         if (state.active && attributedToLoop) toolCallsSinceFire++;
         void event;
         return undefined;
+    });
+
+    // Compaction lifecycle: gate follow-up submission. pi rejects
+    // sendUserMessage while compaction runs; instead of erroring we park the
+    // fire and drain it from session_compact / session_compact_failed.
+    pi.on("session_before_compact", async () => {
+        noteCompactionStart();
+        return undefined;
+    });
+
+    pi.on("session_compact", async () => {
+        noteCompactionEnd();
+    });
+
+    pi.on("session_compact_failed", async () => {
+        noteCompactionEnd();
     });
 
     // User typed something while we were waiting — let their turn run; the
@@ -748,13 +831,22 @@ export default function (pi: ExtensionAPI): void {
 
     pi.registerCommand("ralph-config", {
         description:
-            "Update the ACTIVE ralph loop in place: /ralph-config [--max N] [--max-errors N] [--delay <dur>] [--job-wait <dur>] [--job-grace <dur>] [--stall N] [--stall-cmd <template>] [--job-check <text> | --job-check-file <path>] [new prompt]",
+            "Update the ralph loop in place (active, or paused — edits apply on /ralph-resume): /ralph-config [--max N] [--max-errors N] [--delay <dur>] [--job-wait <dur>] [--job-grace <dur>] [--stall N] [--stall-cmd <template>] [--job-check <text> | --job-check-file <path>] [new prompt]",
         getArgumentCompletions: flagCompletions,
         handler: async (args, ctx) => {
             lastCtx = ctx;
-            if (!state.active) {
-                ctx.ui.notify("ralph-loop: no active loop (use /ralph to start one)", "warning");
-                return;
+            // Works with the loop active OR inactive: when inactive, edits are
+            // applied to the same config source /ralph-resume would pick up
+            // (in-memory loop config, else the persisted saved loop, else
+            // settings defaults), so you can tune a paused loop before
+            // resuming it. The loop is NOT started — use /ralph or
+            // /ralph-resume for that.
+            const wasActive = state.active;
+            if (!wasActive && state.iteration === 0 && savedLoop) {
+                // Align in-memory state with what /ralph-resume would use.
+                state.cfg = { ...savedLoop.cfg };
+                state.stallStreak = savedLoop.stallStreak ?? 0;
+                state.lastStuckFiredAt = savedLoop.lastStuckFiredAt ?? 0;
             }
             let parsed: { cfg: LoopConfig; prompt: string };
             try {
@@ -766,10 +858,23 @@ export default function (pi: ExtensionAPI): void {
             }
             state.cfg = parsed.cfg;
             if (parsed.prompt) state.cfg.prompt = parsed.prompt;
+            if (!wasActive) {
+                // Materialize/refresh the persisted loop so /ralph-resume (in
+                // this session) and reload-restore pick the edited config up.
+                savedLoop = {
+                    active: false,
+                    iteration: state.iteration,
+                    cfg: state.cfg,
+                    lastStuckFiredAt: state.lastStuckFiredAt,
+                    stallStreak: state.stallStreak,
+                    savedAt: Date.now(),
+                };
+            }
             persist();
             setStatus();
             ctx.ui.notify(
-                `Ralph loop updated: delay ${fmtDur(state.cfg.delayMs)}, max ${state.cfg.maxIterations || "unlimited"}, ` +
+                (wasActive ? "Ralph loop updated: " : "Ralph loop config saved (loop not active — /ralph-resume will use it): ") +
+                    `delay ${fmtDur(state.cfg.delayMs)}, max ${state.cfg.maxIterations || "unlimited"}, ` +
                     `job-wait ${state.cfg.maxJobWaitMs ? fmtDur(state.cfg.maxJobWaitMs) : "forever"}, ` +
                     `job-grace ${fmtDur(state.cfg.jobDoneGraceMs)}, max-errors ${state.cfg.maxConsecutiveErrors}` +
                     (parsed.prompt ? " \u2014 prompt replaced" : ""),
