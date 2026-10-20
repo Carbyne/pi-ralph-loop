@@ -1,6 +1,6 @@
 {
   "name": "pi-ralph-loop",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Keep a pi agent working on a task until it is actually finished: an autonomous follow-up loop with iteration caps, error budgets, stall detection, and optional bg-jobs awareness.",
   "license": "MIT",
   "type": "module",

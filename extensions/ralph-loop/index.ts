@@ -263,9 +263,12 @@ export default function (pi: ExtensionAPI): void {
     // set, pi.sendUserMessage throws ("Cannot submit a prompt while compaction
     // is in progress"), so fires are parked in pendingFire and drained when
     // compaction finishes instead of erroring the extension.
+    // Parked follow-up state (compaction gating) — see drainPendingFire().
     let compacting = false;
     let compactWatchdog: NodeJS.Timeout | undefined;
     let pendingFire: { text: string; label: string } | undefined;
+    // Consecutive follow-up send failures (sync throw or async rejection).
+    let sendFailures = 0;
 
     const clearTimer = () => {
         if (timer) {
@@ -368,27 +371,49 @@ export default function (pi: ExtensionAPI): void {
         persist();
         const max = state.cfg.maxIterations > 0 ? `/${state.cfg.maxIterations}` : "";
         const message = `${LOOP_PREFIX} ${label} ${state.iteration}${max}\n\n${text}`;
-        try {
-            pi.sendUserMessage(message, { deliverAs: "followUp" });
-            attributedToLoop = true;
-            toolCallsSinceFire = 0;
-            setStatus();
-            return true;
-        } catch (err) {
+        // pi.sendUserMessage returns a Promise: a rejection (e.g. the agent
+        // became busy between the idle check and the send, or compaction
+        // started) must take the SAME recovery path as a sync throw —
+        // refund the iteration and park/retry, never leave the loop waiting
+        // for a turn that was never queued.
+        const onSendFailure = (err: unknown): void => {
+            if (!state.active) return;
             state.iteration--;
+            sendFailures++;
             const msg = String(err);
-            // Race: compaction started between the idle check and the send.
-            // Enter compacting mode and park the follow-up; do not surface
-            // an extension error (pi recovers on compaction end).
             if (/compact/i.test(msg)) {
                 noteCompactionStart();
                 pendingFire = { text, label };
                 if (lastCtx?.hasUI)
                     lastCtx.ui.notify("Ralph loop: compaction in progress — follow-up deferred until it finishes.", "info");
-                return false;
+                return;
+            }
+            if (sendFailures >= 5) {
+                // Something is persistently wrong (broken model config,
+                // stuck UI) — pause loudly instead of notification spam.
+                sendFailures = 0;
+                pause(`repeated follow-up send failures: ${msg.split("\n")[0].slice(0, 160)}`, "error");
+                return;
             }
             if (lastCtx?.hasUI)
-                lastCtx.ui.notify(`ralph-loop failed to send follow-up: ${msg}`, "error");
+                lastCtx.ui.notify(`ralph-loop failed to send follow-up (${sendFailures}x): ${msg.split("\n")[0]} — retrying on next settle`, "error");
+            // No turn will run, so no agent_settled will re-arm us: retry via
+            // the scheduler after a short backoff.
+            schedule();
+        };
+        try {
+            const p = pi.sendUserMessage(message, { deliverAs: "followUp" }) as unknown as Promise<void> | void;
+            if (p && typeof p.then === "function") {
+                p.then(() => { sendFailures = 0; }, onSendFailure);
+            } else {
+                sendFailures = 0;
+            }
+            attributedToLoop = true;
+            toolCallsSinceFire = 0;
+            setStatus();
+            return true;
+        } catch (err) {
+            onSendFailure(err);
             return false;
         }
     }

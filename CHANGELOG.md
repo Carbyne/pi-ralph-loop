@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.1
+
+### Fixed
+
+- Follow-up sends handle **async rejection** of `pi.sendUserMessage` (it
+  returns a Promise) identically to a sync throw: iteration refunded, retry via
+  scheduler, compaction races parked. Previously a rejection slipped past the
+  try/catch and the loop waited for a turn that was never queued.
+- After 5 consecutive send failures the loop PAUSES loudly instead of retry-
+  notification-spamming.
+
 ## 0.2.0
 
 ### Fixed
